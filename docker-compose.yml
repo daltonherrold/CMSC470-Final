@@ -1,0 +1,29 @@
+version: '3'
+services:
+  qb:
+    image: "8201809f30a585f6a944f39e46d32bb01196e15f649f0540ec8decf1cca1e7af"
+    ports:
+      - "4861:4861"
+    volumes:
+      - ./src/:/src
+      - ./data/:/src/data
+    command: ["bash", "run.sh"]
+  eval:
+    image: "8201809f30a585f6a944f39e46d32bb01196e15f649f0540ec8decf1cca1e7af"
+    volumes:
+      - ./src/:/src
+      - ./data/:/src/data
+      - ./:/eval
+    command: [
+      "python", "/eval/evaluate.py",
+      "--curve-pkl", "/eval/curve_pipeline.pkl",
+      "--wait", "5",
+      "--hostname", "qb",
+      "--norun-web",
+      "--char_step_size", "60",
+      "data/qanta.dev.2018.04.18.json"
+    ]
+    depends_on:
+      - "qb"
+    environment:
+      - "PYTHONUNBUFFERED=1"
