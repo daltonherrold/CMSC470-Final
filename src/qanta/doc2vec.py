@@ -9,9 +9,13 @@ from flask import Flask, jsonify, request
 
 from qanta import util
 from qanta.dataset import QuizBowlDataset
+from qanta.buzzer import LogRegBuzzer, GuessDataset, Example, train_and_save
 
 from gensim.models.doc2vec import Doc2Vec, TaggedDocument
 from nltk.tokenize import word_tokenize
+
+import torch
+import numpy as np
 
 
 MODEL_PATH = 'doc2vec.pickle'
@@ -19,11 +23,21 @@ BUZZ_NUM_GUESSES = 10
 BUZZ_THRESHOLD = 0.3
 
 
-def guess_and_buzz(model, question_text) -> Tuple[str, bool]:
+def guess_and_buzz(model, question_text, vocab, guesser) -> Tuple[str, bool]:
     guesses = model.guess([question_text], BUZZ_NUM_GUESSES)
     scores = [guess[1] for guess in guesses]
-    buzz = scores[0] / sum(scores) >= BUZZ_THRESHOLD
-    return guesses[0][0], buzz
+
+    thing = model.feature_eng(question_text, guesses, scores, True)
+
+    print(thing)
+
+    test = Example(thing, vocab, use_bias=False)
+    
+    temp = guesser.forward(torch.from_numpy(test.x.astype(np.float32)))
+
+    print(temp)
+    
+    return guesses[0][0], False
 
 
 class Doc2VecGuesser:
@@ -48,26 +62,58 @@ class Doc2VecGuesser:
         #     x_array.append(doc)
         #     y_array.append(ans)
 
+        print('Training Doc2Vec.')
         self.i_to_ans = {i: ans for i, ans in enumerate(y_array)}
         tagged_data = [TaggedDocument(words=word_tokenize(_d.lower()), tags=[str(i)]) for i, _d in enumerate(x_array)]
         
-        # max_epochs = 100
-        # vec_size = 20
-        # alpha = 0.025
+        max_epochs = 100
+        vec_size = 20
+        alpha = 0.025
 
         self.model = Doc2Vec(tagged_data, workers=4)
+        # self.model = Doc2Vec(alpha=0.025, vector_size=300, workers=8)
         
-        # model.build_vocab(tagged_data)
+        # self.model.build_vocab(tagged_data)
 
         # for epoch in range(max_epochs):
         #     print('iteration {0}'.format(epoch))
-        #     model.train(tagged_data,
-        #                 total_examples=model.corpus_count,
-        #                 epochs=model.iter)
-        #     # decrease the learning rate
-        #     model.alpha -= 0.0002
-        #     # fix the learning rate, no decay
-        #     model.min_alpha = model.alpha
+        #     self.model.train(tagged_data,
+        #                 total_examples=self.model.corpus_count,
+        #                 epochs=self.model.iter)
+        #     self.model.alpha -= 0.0002
+        #     self.model.min_alpha = self.model.alpha
+    
+    def feature_eng(self, question, guesses, scores, label):
+        return {
+            'score': scores[0],
+            'guess_in_question': 1 if f" {guesses[0][0]} " in question else 0,
+            # Add other linguistic features here
+            'label': 1 if guesses[0][0] == label else 0,
+        }
+
+    def generate_buzz_file(self, training_data) -> None:
+        x_array = training_data[0]
+        y_array = training_data[1]
+        x_array = [' '.join(x) for x in x_array]
+
+        vocab = ['BIAS_CONSTANT']
+
+        print('Writing training file for PyTorch guesser.')
+        with open('log_reg_training.json', 'w') as f:
+            for x, y in zip(x_array, y_array):
+                guesses = self.guess([x], BUZZ_NUM_GUESSES)
+                scores = [guess[1] for guess in guesses]
+                guess = self.feature_eng(x, guesses, scores, y)
+                for ii in guess:
+                    if ii != 'label' and ii not in vocab:
+                        vocab.append(ii)
+                f.write(json.dumps(guess, sort_keys=True))
+                f.write('\n')
+        
+        with open('vocab', 'w') as outfile:
+            for ii in vocab:
+                outfile.write("%s\n" % ii)
+
 
     def guess(self, questions: List[str], max_n_guesses: Optional[int]) -> List[List[Tuple[str, float]]]:
         test = word_tokenize(questions[0].lower())
@@ -100,12 +146,19 @@ class Doc2VecGuesser:
 
 def create_app(enable_batch=True):
     doc2vec_guesser = Doc2VecGuesser.load()
+
+    with open('vocab', 'r') as infile:
+        vocab = [x.strip() for x in infile]
+
+    buzzer = LogRegBuzzer(len(vocab))
+    buzzer.load_state_dict(torch.load('trained_model.th'))
+
     app = Flask(__name__)
 
     @app.route('/api/1.0/quizbowl/act', methods=['POST'])
     def act():
         question = request.json['text']
-        guess, buzz = guess_and_buzz(doc2vec_guesser, question)
+        guess, buzz = guess_and_buzz(doc2vec_guesser, question, vocab, buzzer)
         return jsonify({'guess': guess, 'buzz': True if buzz else False})
 
     @app.route('/api/1.0/quizbowl/status', methods=['GET'])
@@ -140,13 +193,16 @@ def web(host, port, disable_batch):
 
 @cli.command()
 def train():
-    """
-    Train the tfidf model, requires downloaded data and saves to models/
-    """
+    # Training for the Doc2Vec Guesser
     dataset = QuizBowlDataset(guesser_train=True)
     doc2vec_guesser = Doc2VecGuesser()
     doc2vec_guesser.train(dataset.training_data())
     doc2vec_guesser.save()
+
+    # Training for the Log Reg Guesser
+    dataset2 = QuizBowlDataset(buzzer_train=True)
+    doc2vec_guesser.generate_buzz_file(dataset2.training_data())
+    train_and_save()
 
 
 @cli.command()
