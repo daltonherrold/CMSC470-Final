@@ -9,7 +9,7 @@ from flask import Flask, jsonify, request
 
 from qanta import util
 from qanta.dataset import QuizBowlDataset
-from qanta.buzzer import LogRegBuzzer, GuessDataset, Example, train_and_save
+from qanta.buzzer import LogRegBuzzer, Example, train_and_save
 
 from gensim.models.doc2vec import Doc2Vec, TaggedDocument
 from nltk.tokenize import word_tokenize
@@ -29,15 +29,11 @@ def guess_and_buzz(model, question_text, vocab, guesser) -> Tuple[str, bool]:
 
     thing = model.feature_eng(question_text, guesses, scores, True)
 
-    print(thing)
-
     test = Example(thing, vocab, use_bias=False)
     
     temp = guesser.forward(torch.from_numpy(test.x.astype(np.float32)))
-
-    print(temp)
     
-    return guesses[0][0], False
+    return guesses[0][0], int(temp.round().item()) == 1
 
 
 class Doc2VecGuesser:
@@ -87,7 +83,8 @@ class Doc2VecGuesser:
         return {
             'score': scores[0],
             'guess_in_question': 1 if f" {guesses[0][0]} " in question else 0,
-            # Add other linguistic features here
+            'top_two_diff': scores[0] - scores[1],
+            'number_same_guesses': sum([1 if x[0] == guesses[0][0] else 0 for x in guesses]) - 1,
             'label': 1 if guesses[0][0] == label else 0,
         }
 
